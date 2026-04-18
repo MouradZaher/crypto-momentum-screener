@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useMemo, useCallback } from "react";
 import axios from "axios";
 import { 
   TrendingUp, 
@@ -12,58 +12,188 @@ import {
   Activity,
   Globe,
   RefreshCw,
-  AlertTriangle
+  AlertTriangle,
+  Settings
 } from "lucide-react";
+import { motion, AnimatePresence } from "framer-motion";
+import { Toaster, toast } from "sonner";
 import { MomentumResult, calculateMomentum } from "@/lib/engine";
+import { usePriceStream } from "@/hooks/usePriceStream";
+import { SparklineChart } from "./InteractiveChart";
 
 const COINGECKO_API = "https://api.coingecko.com/api/v3";
 
+// Memoized individual asset row for 1s performance
+const AssetRow = React.memo(({ asset, isSelected, onClick, livePrice }: { 
+  asset: MomentumResult, 
+  isSelected: boolean, 
+  onClick: () => void,
+  livePrice?: number 
+}) => {
+  return (
+    <motion.tr 
+      layout
+      initial={{ opacity: 0 }}
+      animate={{ 
+        opacity: 1,
+        backgroundColor: isSelected ? "rgba(37, 99, 235, 0.08)" : "transparent"
+      }}
+      exit={{ opacity: 0 }}
+      className="group transition-all hover:bg-slate-800/40 cursor-pointer relative overflow-hidden"
+      onClick={onClick}
+    >
+      {asset.momentumScore > 85 && (
+        <motion.div 
+          className="absolute inset-0 bg-gradient-to-r from-emerald-500/5 to-transparent pointer-events-none"
+          animate={{ opacity: [0.3, 0.6, 0.3] }}
+          transition={{ duration: 2, repeat: Infinity }}
+        />
+      )}
+      <td className="px-8 py-6">
+        <div className="flex items-center gap-4">
+          <div className="relative">
+            <img src={asset.image} alt="" className="w-10 h-10 rounded-xl shadow-lg" />
+            <div className={`absolute -bottom-1 -right-1 w-3 h-3 rounded-full border-2 border-[#020617] ${livePrice ? 'bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.5)]' : 'bg-slate-600'}`} />
+          </div>
+          <div>
+            <div className="font-black text-slate-100 uppercase tracking-tight text-lg">{asset.name}</div>
+            <div className="text-[10px] text-blue-500/60 font-black tracking-[0.2em]">{asset.symbol.toUpperCase()}</div>
+          </div>
+        </div>
+      </td>
+      <td className="px-8 py-6">
+         <div className="flex flex-col">
+           <span className="font-mono font-bold text-slate-100 text-lg tracking-tight">
+             ${(livePrice || asset.current_price || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+           </span>
+           <span className={`text-[11px] font-black flex items-center gap-1 ${(asset.price_change_percentage_24h ?? 0) >= 0 ? 'text-emerald-500' : 'text-rose-500'}`}>
+             {(asset.price_change_percentage_24h ?? 0) >= 0 ? '+' : ''}{(asset.price_change_percentage_24h ?? 0).toFixed(2)}%
+           </span>
+         </div>
+      </td>
+      <td className="px-8 py-6">
+        <div className="flex flex-col gap-1.5">
+          <div className="flex items-center justify-between gap-10">
+            <span className="font-mono text-sm font-bold text-slate-300">{(asset.momentumVelocity ?? 0).toFixed(2)}x</span>
+          </div>
+          <div className="w-24 h-1.5 bg-slate-800/50 rounded-full overflow-hidden">
+            <motion.div 
+              className={`h-full bg-blue-500 shadow-[0_0_12px_rgba(59,130,246,0.5)]`} 
+              animate={{ width: `${Math.min((asset.momentumVelocity ?? 0) * 20, 100)}%` }}
+            />
+          </div>
+        </div>
+      </td>
+      <td className="px-8 py-6">
+         <div className={`font-mono text-sm font-black ${(asset.betaFactor ?? 1) > 1.2 ? 'text-emerald-400' : (asset.betaFactor ?? 1) < 0.8 ? 'text-rose-400' : 'text-slate-400'}`}>
+           {(asset.betaFactor ?? 1).toFixed(2)}β
+         </div>
+      </td>
+      <td className="px-8 py-6 font-mono text-sm font-bold text-blue-400">
+        {(asset.volumeMCapRatio || 0).toFixed(3)}
+      </td>
+      <td className="px-8 py-6">
+        <div className={`text-2xl font-black tracking-tight ${asset.momentumScore > 80 ? 'text-emerald-400' : asset.momentumScore > 60 ? 'text-blue-400' : 'text-slate-100'}`}>
+          {asset.momentumScore}
+        </div>
+      </td>
+      <td className="px-8 py-6">
+        <div className="flex flex-wrap gap-2">
+          {asset.isEarlyBuyer && (
+            <motion.span 
+              animate={{ scale: [1, 1.05, 1] }}
+              transition={{ duration: 1, repeat: Infinity }}
+              className="bg-emerald-500 text-[#020617] text-[10px] font-black px-2.5 py-1 rounded shadow-[0_0_15px_rgba(16,185,129,0.3)] uppercase tracking-tighter"
+            >
+              Early Entry
+            </motion.span>
+          )}
+        </div>
+      </td>
+    </motion.tr>
+  );
+});
+
+AssetRow.displayName = "AssetRow";
+
 export default function Dashboard() {
-  const [assets, setAssets] = useState<MomentumResult[]>([]);
+  const [baseAssets, setBaseAssets] = useState<MomentumResult[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [selectedAsset, setSelectedAsset] = useState<MomentumResult | null>(null);
   const [aiAnalysis, setAiAnalysis] = useState<string | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
+  const [refreshTimer, setRefreshTimer] = useState(0);
+
+  // 1s Real-Time Price Stream (Binance WebSocket)
+  const livePrices = usePriceStream(true);
+
+  // Sync WebSocket prices into the asset list at 1s intervals
+  const assets = useMemo(() => {
+    if (baseAssets.length === 0) return [];
+    
+    // Find BTC change for Beta calculation
+    const btcAsset = baseAssets.find(a => a.symbol === 'btc');
+    const btcChange = btcAsset?.price_change_percentage_24h || 0;
+
+    const updated = baseAssets.map(asset => {
+      const livePrice = livePrices[asset.symbol.toLowerCase()];
+      if (livePrice && livePrice !== asset.current_price) {
+        return calculateMomentum({ ...asset, current_price: livePrice }, btcChange);
+      }
+      return asset;
+    });
+
+    return updated.sort((a, b) => b.momentumScore - a.momentumScore);
+  }, [baseAssets, livePrices]);
 
   useEffect(() => {
     fetchData();
+    const interval = setInterval(() => fetchData(), 30000); 
+    return () => clearInterval(interval);
   }, []);
 
-  const fetchData = async () => {
-    setLoading(true);
-    setError(null);
+  useEffect(() => {
+    const timer = setInterval(() => setRefreshTimer(t => t + 1), 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  const fetchData = async (isManual = false) => {
+    if (isManual) setLoading(true);
     try {
-      // Switching to client-side fetch to bypass Vercel server IP rate limits (429)
       const { data } = await axios.get(`${COINGECKO_API}/coins/markets`, {
         params: {
           vs_currency: 'usd',
           order: 'market_cap_desc',
           per_page: 250,
           page: 1,
-          sparkline: false,
+          sparkline: true,
           price_change_percentage: '24h',
         },
       });
       
-      const processed = data.map((a: any) => calculateMomentum(a))
-        .sort((a: any, b: any) => b.momentumScore - a.momentumScore);
-        
-      setAssets(processed);
+      const btc = data.find((a: any) => a.symbol === 'btc');
+      const btcChange = btc?.price_change_percentage_24h || 0;
+
+      const processed = data.map((a: any) => calculateMomentum(a, btcChange));
+      
+      processed.forEach(asset => {
+        if (asset.isEarlyBuyer && !baseAssets.find(prev => prev.id === asset.id)?.isEarlyBuyer) {
+          toast.success(`SIGNAL DETECTED: ${asset.name}`, { description: "High volume consolidation breakout." });
+        }
+      });
+
+      setBaseAssets(processed);
+      setError(null);
     } catch (err: any) {
-      console.error(err);
-      const isRateLimit = err.response?.status === 429;
-      setError(isRateLimit 
-        ? "CoinGecko is rate-limiting your connection. Please wait 1 minute and refresh." 
-        : (err.message || "Failed to connect to the intelligence engine.")
-      );
+      if (isManual) setError("Telemetry data unavailable.");
     } finally {
-      setLoading(false);
+      if (isManual) setLoading(false);
     }
   };
 
-  const runAnalysis = async (asset: MomentumResult) => {
+  const runAnalysis = useCallback(async (asset: MomentumResult) => {
     setSelectedAsset(asset);
     setAnalyzing(true);
     setAiAnalysis(null);
@@ -71,11 +201,11 @@ export default function Dashboard() {
       const { data } = await axios.post("/api/analyze", { asset });
       setAiAnalysis(data.summary);
     } catch (err) {
-      setAiAnalysis("Analysis currently unavailable.");
+      setAiAnalysis("Neural interface restricted. Verify GEMINI_API_KEY.");
     } finally {
       setAnalyzing(false);
     }
-  };
+  }, []);
 
   const filteredAssets = assets.filter(
     (a) =>
@@ -84,214 +214,136 @@ export default function Dashboard() {
   );
 
   return (
-    <div className="min-h-screen bg-[#020617] text-slate-100 p-6 lg:p-10 font-sans">
-      <header className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-10">
+    <div className="min-h-screen bg-[#020617] text-slate-100 p-6 lg:p-10 font-sans tracking-tight">
+      <Toaster theme="dark" position="top-right" richColors />
+      
+      <header className="flex flex-col md:flex-row md:items-center justify-between gap-6 mb-12">
         <div>
-          <h1 className="text-4xl font-extrabold tracking-tight flex items-center gap-3">
-            <TrendingUp className="text-blue-500 w-10 h-10" />
-            Crypto<span className="text-blue-500">Momentum</span>
+          <h1 className="text-5xl font-black tracking-tighter flex items-center gap-4 italic uppercase">
+            <TrendingUp className="text-blue-500 w-12 h-12" />
+            Terminal<span className="text-blue-500">Momentum</span>
           </h1>
-          <p className="text-slate-400 mt-2 text-sm uppercase tracking-widest font-semibold flex items-center gap-2">
-           Institutional-Grade Early Buyer Intelligence <Activity className="w-4 h-4 text-emerald-500" />
-          </p>
+          <div className="flex items-center gap-3 mt-3">
+             <div className="px-2 py-0.5 bg-blue-500/10 border border-blue-500/30 rounded text-[10px] text-blue-400 font-bold uppercase tracking-widest">v2.0 Elite</div>
+             <p className="text-slate-500 text-xs font-semibold flex items-center gap-2">
+               Binance WS Delta Sync <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+             </p>
+          </div>
         </div>
 
         <div className="flex items-center gap-4">
-          <div className="relative group">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 w-4 h-4 group-focus-within:text-blue-500 transition-colors" />
+          <div className="bg-[#0f172a] border border-slate-800 rounded-xl px-4 py-2 flex items-center gap-4">
+             <span className="text-[10px] text-slate-600 uppercase font-black tracking-widest">Cycle: {30 - (refreshTimer % 30)}s</span>
+          </div>
+          <div className="relative">
+            <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-500 w-5 h-5" />
             <input
               type="text"
-              placeholder="Search assets..."
-              className="bg-[#0f172a] border border-slate-800 rounded-lg pl-10 pr-4 py-2.5 w-64 md:w-80 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition-all text-sm"
+              placeholder="Matrix Identifier..."
+              className="bg-[#0f172a] border border-slate-800 rounded-xl pl-12 pr-6 py-3.5 w-64 md:w-80 outline-none focus:border-blue-500 transition-all text-sm font-bold"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
             />
           </div>
-          <button 
-            onClick={fetchData} 
-            className="p-2.5 rounded-lg border border-slate-800 bg-[#0f172a] hover:bg-slate-800 transition-colors"
-            title="Refresh Data"
-          >
-            <RefreshCw className={`w-5 h-5 ${loading ? 'animate-spin text-blue-500' : 'text-slate-400'}`} />
-          </button>
         </div>
       </header>
 
-      {error && (
-        <div className="mb-8 p-4 bg-rose-500/10 border border-rose-500/30 rounded-xl flex items-center gap-4 text-rose-400">
-          <AlertTriangle className="w-6 h-6 shrink-0" />
-          <div>
-            <p className="font-bold">Intelligence Feed Interrupted</p>
-            <p className="text-xs opacity-80">{error}</p>
-          </div>
-          <button onClick={fetchData} className="ml-auto underline text-xs font-bold hover:text-rose-300">Retry Fetch</button>
-        </div>
-      )}
-
-      <div className="grid grid-cols-1 xl:grid-cols-4 gap-8">
+      <div className="grid grid-cols-1 xl:grid-cols-4 gap-10">
         <div className="xl:col-span-3">
-          <div className="glass-panel rounded-2xl overflow-hidden border border-slate-800">
+          <div className="bg-[#0f172a]/40 backdrop-blur-3xl rounded-3xl overflow-hidden border border-slate-800/50 shadow-2xl">
             <div className="overflow-x-auto">
               <table className="w-full text-left border-collapse">
                 <thead>
-                  <tr className="bg-[#0f172a]/50 text-slate-400 text-[10px] uppercase font-bold tracking-tighter border-b border-slate-800">
-                    <th className="px-6 py-4">Asset</th>
-                    <th className="px-6 py-4">Price</th>
-                    <th className="px-6 py-4">24h Change</th>
-                    <th className="px-6 py-4">Vol/MCap</th>
-                    <th className="px-6 py-4">Score</th>
-                    <th className="px-6 py-4">Signals</th>
-                    <th className="px-6 py-4"></th>
+                  <tr className="bg-[#0f172a]/60 text-slate-500 text-[10px] uppercase font-black tracking-[0.2em] border-b border-slate-800/50">
+                    <th className="px-8 py-6">Intelligence</th>
+                    <th className="px-8 py-6">Price ($)</th>
+                    <th className="px-8 py-6">Velocity</th>
+                    <th className="px-8 py-6">Beta</th>
+                    <th className="px-8 py-6">V/MC</th>
+                    <th className="px-8 py-6">Score</th>
+                    <th className="px-8 py-6">Status</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-slate-800/50">
-                  {loading ? (
-                    [...Array(10)].map((_, i) => (
-                      <tr key={i} className="animate-pulse">
-                        <td className="px-6 py-4" colSpan={7}>
-                          <div className="h-6 bg-slate-800/50 rounded w-full"></div>
-                        </td>
-                      </tr>
-                    ))
-                  ) : filteredAssets.length === 0 && !error ? (
-                    <tr>
-                      <td colSpan={7} className="px-6 py-20 text-center text-slate-500">
-                         No assets found in the current scan.
-                      </td>
-                    </tr>
-                  ) : (
-                    filteredAssets.map((asset) => (
-                      <tr 
-                        key={asset.id} 
-                        className={`hover:bg-slate-800/30 transition-colors group ${selectedAsset?.id === asset.id ? 'bg-blue-900/10' : ''}`}
-                      >
-                        <td className="px-6 py-4">
-                          <div className="flex items-center gap-3">
-                            <img src={asset.image} alt="" className="w-8 h-8 rounded-full" />
-                            <div>
-                              <div className="font-bold text-slate-100">{asset.name}</div>
-                              <div className="text-[10px] text-slate-500 font-mono tracking-widest">{asset.symbol.toUpperCase()}</div>
-                            </div>
-                          </div>
-                        </td>
-                        <td className="px-6 py-4 font-mono text-sm">
-                          ${(asset.current_price ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}
-                        </td>
-                        <td className="px-6 py-4">
-                          <div className={`flex items-center gap-1 font-bold ${(asset.price_change_percentage_24h ?? 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                            {(asset.price_change_percentage_24h ?? 0) >= 0 ? <TrendingUp className="w-4 h-4" /> : <TrendingDown className="w-4 h-4" />}
-                            {(asset.price_change_percentage_24h ?? 0).toFixed(2)}%
-                          </div>
-                        </td>
-                        <td className="px-6 py-4">
-                          <div className="flex flex-col gap-1">
-                            <span className="font-mono text-sm">{asset.volumeMCapRatio?.toFixed(4) ?? '0.0000'}</span>
-                            <div className="w-24 h-1 bg-slate-800 rounded-full overflow-hidden">
-                              <div 
-                                className={`h-full ${asset.volumeMCapRatio > 0.15 ? 'bg-blue-500 shadow-[0_0_8px_rgba(59,130,246,0.6)]' : 'bg-slate-600'}`} 
-                                style={{ width: `${Math.min(asset.volumeMCapRatio * 300, 100)}%` }}
-                              ></div>
-                            </div>
-                          </div>
-                        </td>
-                        <td className="px-6 py-4">
-                          <div className={`text-lg font-black tracking-tighter ${asset.momentumScore > 75 ? 'momentum-extreme' : 'text-slate-100'}`}>
-                            {asset.momentumScore}
-                          </div>
-                        </td>
-                        <td className="px-6 py-4">
-                          <div className="flex flex-wrap gap-2">
-                            {asset.isEarlyBuyer && (
-                              <span className="bg-blue-900/30 text-blue-400 border border-blue-500/30 text-[9px] font-black px-2 py-0.5 rounded uppercase tracking-widest flex items-center gap-1">
-                                <Zap className="w-3 h-3" /> Early Buyer
-                              </span>
-                            )}
-                            {asset.momentumScore > 60 && (
-                              <span className="bg-emerald-900/30 text-emerald-400 border border-emerald-500/30 text-[9px] font-black px-2 py-0.5 rounded uppercase tracking-widest flex items-center gap-1">
-                                <Activity className="w-3 h-3" /> High Momentum
-                              </span>
-                            )}
-                          </div>
-                        </td>
-                        <td className="px-6 py-4 text-right">
-                          <button 
-                            onClick={() => runAnalysis(asset)}
-                            className="text-slate-500 hover:text-blue-400 transition-colors p-1"
-                          >
-                            <ChevronRight className="w-6 h-6" />
-                          </button>
-                        </td>
-                      </tr>
-                    ))
-                  )}
+                <tbody className="divide-y divide-slate-800/20">
+                  <AnimatePresence mode="popLayout">
+                    {loading && baseAssets.length === 0 ? (
+                      [...Array(8)].map((_, i) => (
+                        <tr key={i} className="animate-pulse">
+                          <td className="px-8 py-6" colSpan={7}><div className="h-10 bg-slate-800/40 rounded-xl w-full"></div></td>
+                        </tr>
+                      ))
+                    ) : (
+                      filteredAssets.map((asset) => (
+                        <AssetRow 
+                          key={asset.id} 
+                          asset={asset}
+                          isSelected={selectedAsset?.id === asset.id}
+                          onClick={() => runAnalysis(asset)}
+                          livePrice={livePrices[asset.symbol.toLowerCase()]}
+                        />
+                      ))
+                    )}
+                  </AnimatePresence>
                 </tbody>
               </table>
             </div>
           </div>
         </div>
 
-        <div className="xl:col-span-1 space-y-6">
-          <div className="glass-panel rounded-2xl p-6 border border-slate-800 sticky top-6">
-            <h3 className="text-xl font-bold flex items-center gap-2 mb-6">
-              <Globe className="text-blue-500 w-6 h-6" />
+        <div className="xl:col-span-1">
+          <div className="bg-[#0f172a]/50 backdrop-blur-3xl rounded-3xl p-8 border border-slate-800/50 flex flex-col min-h-[700px] sticky top-10 shadow-3xl">
+            <h3 className="text-2xl font-black italic tracking-tighter flex items-center gap-3 mb-8">
+              <Activity className="text-blue-500 w-8 h-8" />
               Intelligence Hub
             </h3>
 
             {!selectedAsset ? (
-              <div className="flex flex-col items-center justify-center py-20 text-center text-slate-500">
-                <AlertCircle className="w-12 h-12 mb-4 opacity-20" />
-                <p className="text-sm">Select an asset to generate AI-driven momentum analysis.</p>
+              <div className="flex-1 flex flex-col items-center justify-center text-center opacity-40">
+                <AlertCircle className="w-16 h-16 mb-6" />
+                <p className="text-sm uppercase font-black tracking-[0.2em]">Uplink Pending</p>
               </div>
             ) : (
-              <div className="space-y-6">
-                <div className="flex items-center gap-4 border-b border-slate-800 pb-4">
-                  <img src={selectedAsset.image} alt="" className="w-12 h-12 rounded-full" />
+              <div className="space-y-8 flex-1 flex flex-col">
+                <div className="flex items-center gap-6 border-b border-slate-800/50 pb-8">
+                  <img src={selectedAsset.image} alt="" className="w-16 h-16 rounded-2xl" />
                   <div>
-                    <h4 className="text-xl font-bold">{selectedAsset.name}</h4>
-                    <p className="text-slate-400 text-sm font-mono">{selectedAsset.symbol.toUpperCase()}</p>
+                    <h4 className="text-2xl font-black uppercase tracking-tight leading-none">{selectedAsset.name}</h4>
+                    <p className="text-blue-500 text-sm font-black tracking-[0.3em] mt-1">{selectedAsset.symbol.toUpperCase()}</p>
                   </div>
                 </div>
 
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="bg-[#0f172a] p-3 rounded-xl border border-slate-800">
-                    <p className="text-[10px] text-slate-500 uppercase font-bold tracking-widest mb-1">Rank</p>
-                    <p className="text-lg font-black font-mono">#{selectedAsset.market_cap_rank ?? 'N/A'}</p>
-                  </div>
-                  <div className="bg-[#0f172a] p-3 rounded-xl border border-slate-800">
-                    <p className="text-[10px] text-slate-500 uppercase font-bold tracking-widest mb-1">Vol/MCap</p>
-                    <p className="text-lg font-black font-mono">{selectedAsset.volumeMCapRatio?.toFixed(4) ?? '0.0000'}</p>
-                  </div>
+                <div className="bg-[#020617]/50 rounded-2xl p-6 border border-slate-800 space-y-4">
+                  <p className="text-[10px] text-slate-500 uppercase font-black tracking-widest">24h Neural Snapshot</p>
+                  <SparklineChart 
+                    data={(selectedAsset as any).sparkline_in_7d?.price?.slice(-24) || [1,2,3,4,3,2,3,4,5,4]} 
+                    color={selectedAsset.price_change_percentage_24h && selectedAsset.price_change_percentage_24h > 0 ? "#10b981" : "#ef4444"}
+                  />
                 </div>
 
-                <div className="space-y-2">
-                  <p className="text-[10px] text-slate-500 uppercase font-bold tracking-widest flex items-center gap-2">
-                    <Zap className="w-3 h-3 text-blue-500" />
-                    AI Insights (Gemini 1.5 Flash)
+                <div className="flex-1 flex flex-col bg-[#020617]/40 border-2 border-slate-800/50 p-6 rounded-2xl">
+                  <p className="text-[11px] text-slate-600 uppercase font-black tracking-widest mb-4 flex items-center justify-between">
+                    AI Analysis 2.0
+                    {analyzing && <RefreshCw className="w-3 h-3 animate-spin text-blue-500" />}
                   </p>
-                  <div className="bg-blue-500/5 border border-blue-500/20 p-4 rounded-xl min-h-[120px] text-slate-300 text-sm leading-relaxed relative overflow-hidden">
-                    {analyzing ? (
-                      <div className="flex flex-col gap-3 py-2">
-                        <div className="h-4 bg-blue-500/10 rounded w-full animate-pulse"></div>
-                        <div className="h-4 bg-blue-500/10 rounded w-[90%] animate-pulse"></div>
-                        <div className="h-4 bg-blue-500/10 rounded w-[70%] animate-pulse"></div>
-                      </div>
-                    ) : (
-                      aiAnalysis || "Click the 'AI Analyze' button to generate deep research."
-                    )}
+                  <div className="text-slate-300 text-sm leading-relaxed overflow-y-auto max-h-[250px] scrollbar-hide">
+                    {aiAnalysis || "Matrix analysis generated upon execution."}
                   </div>
                 </div>
 
                 {!aiAnalysis && !analyzing && (
                   <button 
                     onClick={() => runAnalysis(selectedAsset)}
-                    className="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold py-3 px-4 rounded-xl transition-all shadow-[0_0_20px_rgba(37,99,235,0.3)] flex items-center justify-center gap-2"
+                    className="w-full bg-blue-600 hover:bg-blue-500 text-white font-black py-5 px-6 rounded-2xl transition-all shadow-glow uppercase"
                   >
-                    <Activity className="w-5 h-5" /> Generate Deep Analysis
+                    Generate Analysis
                   </button>
                 )}
-                
-                <div className="pt-4 border-t border-slate-800">
-                   <p className="text-[10px] text-slate-600 italic">Disclaimers apply. All insights are generated by AI and do not constitute financial advice.</p>
+
+                <div className="p-4 bg-slate-800/20 rounded-xl border border-slate-800/50 flex items-start gap-3">
+                   <Settings className="w-4 h-4 text-slate-500 mt-0.5" />
+                   <div className="text-[10px] text-slate-500 leading-tight">
+                      Neural interface requires <b>GEMINI_API_KEY</b>. Configure in Vercel settings for high-conviction insights.
+                   </div>
                 </div>
               </div>
             )}

@@ -1,28 +1,41 @@
 import { NextResponse } from 'next/server';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '');
+// Principal Quant Analyst Persona Prompt
+const SYSTEM_PROMPT = `You are a Principal Quant Developer and Skeptical Hedge fund Analyst at an elite crypto trading desk. 
+Your goal is to debunk "fake-outs" and identify "True institutional breakouts" based on raw on-chain and price action data.
+Be concise (2-3 sentences), razor-sharp, and use institutional trading terminology.
+Distinguish between "Dead Cat Bouncing" (low momentum, high retail noise) and "Volume-backed accumulation" (supply vacuum).`;
 
 export async function POST(req: Request) {
   try {
     const { asset } = await req.json();
     
-    if (!process.env.GEMINI_API_KEY) {
-      return NextResponse.json({ summary: "Gemini API key not configured. Summary unavailable." });
+    // Check for API key and provide instructional fallback
+    if (!process.env.GEMINI_API_KEY || process.env.GEMINI_API_KEY === 'your_gemini_api_key_here') {
+      return NextResponse.json({ 
+        summary: "SYSTEM ERROR: Neural Link Offline. Please configure your GEMINI_API_KEY in the environment settings to unlock Principal Analyst intelligence. Current signals suggest high-velocity monitoring is operational, but qualitative research is locked.",
+        isMissingKey: true
+      });
     }
 
-    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+    const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+    const model = genAI.getGenerativeModel({ 
+      model: "gemini-1.5-flash",
+      systemInstruction: SYSTEM_PROMPT
+    });
 
     const prompt = `
-      Analyze the following crypto asset for current momentum and "Early Buyer" potential:
-      Name: ${asset.name}
-      Symbol: ${asset.symbol}
-      Price: $${asset.current_price}
-      24h Change: ${asset.price_change_percentage_24h}%
-      Volume/Market Cap Ratio: ${asset.volumeMCapRatio}
-      Market Cap Rank: ${asset.market_cap_rank}
+      RAW DATA UPLINK:
+      Asset: ${asset.name} (${asset.symbol.toUpperCase()})
+      Current Price: $${asset.current_price}
+      24h Momentum Change: ${asset.price_change_percentage_24h}%
+      Momentum Velocity: ${asset.momentumVelocity}x (Relative to Volume)
+      Beta Factor: ${asset.betaFactor}β (Relative to BTC Trend)
+      Vol/MCap Ratio: ${asset.volumeMCapRatio} (Lower is more liquid, Higher is early buyer territory)
+      Total Momentum Score: ${asset.momentumScore}/100
       
-      Provide a brief (2-3 sentence) summary explaining if this is a high-potential breakout or a potential fakeout. Use trader terminology like "bullish divergence", "accumulation", or "volume-backed expansion".
+      ANALYZE: Is this an institutional breakout or a retail pump? Provide a skeptical high-conviction assessment.
     `;
 
     const result = await model.generateContent(prompt);
@@ -31,6 +44,8 @@ export async function POST(req: Request) {
     return NextResponse.json({ summary });
   } catch (error: any) {
     console.error('AI Analysis Error:', error.message);
-    return NextResponse.json({ summary: "Analyis temporarily unavailable." }, { status: 500 });
+    return NextResponse.json({ 
+      summary: "QUANT ADVISORY: Neural processing error. Check API quotas or model availability." 
+    }, { status: 500 });
   }
 }
