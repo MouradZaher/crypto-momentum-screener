@@ -11,13 +11,15 @@ import {
   TrendingDown,
   Activity,
   Globe,
-  RefreshCw
+  RefreshCw,
+  AlertTriangle
 } from "lucide-react";
 import { MomentumResult } from "@/lib/engine";
 
 export default function Dashboard() {
   const [assets, setAssets] = useState<MomentumResult[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [selectedAsset, setSelectedAsset] = useState<MomentumResult | null>(null);
   const [aiAnalysis, setAiAnalysis] = useState<string | null>(null);
@@ -29,11 +31,17 @@ export default function Dashboard() {
 
   const fetchData = async () => {
     setLoading(true);
+    setError(null);
     try {
       const { data } = await axios.get("/api/market");
-      setAssets(data);
-    } catch (err) {
+      if (data.error) {
+        setError(`${data.error}: ${data.detail || 'Unknown error'}`);
+      } else {
+        setAssets(data);
+      }
+    } catch (err: any) {
       console.error(err);
+      setError(err.response?.data?.detail || err.message || "Failed to connect to the intelligence engine.");
     } finally {
       setLoading(false);
     }
@@ -93,6 +101,17 @@ export default function Dashboard() {
         </div>
       </header>
 
+      {error && (
+        <div className="mb-8 p-4 bg-rose-500/10 border border-rose-500/30 rounded-xl flex items-center gap-4 text-rose-400">
+          <AlertTriangle className="w-6 h-6 shrink-0" />
+          <div>
+            <p className="font-bold">Intelligence Feed Interrupted</p>
+            <p className="text-xs opacity-80">{error}</p>
+          </div>
+          <button onClick={fetchData} className="ml-auto underline text-xs font-bold hover:text-rose-300">Retry Fetch</button>
+        </div>
+      )}
+
       <div className="grid grid-cols-1 xl:grid-cols-4 gap-8">
         <div className="xl:col-span-3">
           <div className="glass-panel rounded-2xl overflow-hidden border border-slate-800">
@@ -118,6 +137,12 @@ export default function Dashboard() {
                         </td>
                       </tr>
                     ))
+                  ) : filteredAssets.length === 0 && !error ? (
+                    <tr>
+                      <td colSpan={7} className="px-6 py-20 text-center text-slate-500">
+                         No momentum breakouts detected in the current scan.
+                      </td>
+                    </tr>
                   ) : (
                     filteredAssets.map((asset) => (
                       <tr 
