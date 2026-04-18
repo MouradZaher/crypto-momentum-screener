@@ -14,7 +14,9 @@ import {
   RefreshCw,
   AlertTriangle
 } from "lucide-react";
-import { MomentumResult } from "@/lib/engine";
+import { MomentumResult, calculateMomentum } from "@/lib/engine";
+
+const COINGECKO_API = "https://api.coingecko.com/api/v3";
 
 export default function Dashboard() {
   const [assets, setAssets] = useState<MomentumResult[]>([]);
@@ -33,15 +35,29 @@ export default function Dashboard() {
     setLoading(true);
     setError(null);
     try {
-      const { data } = await axios.get("/api/market");
-      if (data.error) {
-        setError(`${data.error}: ${data.detail || 'Unknown error'}`);
-      } else {
-        setAssets(data);
-      }
+      // Switching to client-side fetch to bypass Vercel server IP rate limits (429)
+      const { data } = await axios.get(`${COINGECKO_API}/coins/markets`, {
+        params: {
+          vs_currency: 'usd',
+          order: 'market_cap_desc',
+          per_page: 250,
+          page: 1,
+          sparkline: false,
+          price_change_percentage: '24h',
+        },
+      });
+      
+      const processed = data.map((a: any) => calculateMomentum(a))
+        .sort((a: any, b: any) => b.momentumScore - a.momentumScore);
+        
+      setAssets(processed);
     } catch (err: any) {
       console.error(err);
-      setError(err.response?.data?.detail || err.message || "Failed to connect to the intelligence engine.");
+      const isRateLimit = err.response?.status === 429;
+      setError(isRateLimit 
+        ? "CoinGecko is rate-limiting your connection. Please wait 1 minute and refresh." 
+        : (err.message || "Failed to connect to the intelligence engine.")
+      );
     } finally {
       setLoading(false);
     }
@@ -122,8 +138,8 @@ export default function Dashboard() {
                     <th className="px-6 py-4">Asset</th>
                     <th className="px-6 py-4">Price</th>
                     <th className="px-6 py-4">24h Change</th>
-                    <th className="px-6 py-4">Vol/MCap Ratio</th>
-                    <th className="px-6 py-4">Momentum Score</th>
+                    <th className="px-6 py-4">Vol/MCap</th>
+                    <th className="px-6 py-4">Score</th>
                     <th className="px-6 py-4">Signals</th>
                     <th className="px-6 py-4"></th>
                   </tr>
@@ -140,7 +156,7 @@ export default function Dashboard() {
                   ) : filteredAssets.length === 0 && !error ? (
                     <tr>
                       <td colSpan={7} className="px-6 py-20 text-center text-slate-500">
-                         No momentum breakouts detected in the current scan.
+                         No assets found in the current scan.
                       </td>
                     </tr>
                   ) : (
@@ -159,17 +175,17 @@ export default function Dashboard() {
                           </div>
                         </td>
                         <td className="px-6 py-4 font-mono text-sm">
-                          ${asset.current_price.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                          ${(asset.current_price ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}
                         </td>
                         <td className="px-6 py-4">
-                          <div className={`flex items-center gap-1 font-bold ${asset.price_change_percentage_24h >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                            {asset.price_change_percentage_24h >= 0 ? <TrendingUp className="w-4 h-4" /> : <TrendingDown className="w-4 h-4" />}
-                            {asset.price_change_percentage_24h.toFixed(2)}%
+                          <div className={`flex items-center gap-1 font-bold ${(asset.price_change_percentage_24h ?? 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                            {(asset.price_change_percentage_24h ?? 0) >= 0 ? <TrendingUp className="w-4 h-4" /> : <TrendingDown className="w-4 h-4" />}
+                            {(asset.price_change_percentage_24h ?? 0).toFixed(2)}%
                           </div>
                         </td>
                         <td className="px-6 py-4">
                           <div className="flex flex-col gap-1">
-                            <span className="font-mono text-sm">{asset.volumeMCapRatio}</span>
+                            <span className="font-mono text-sm">{asset.volumeMCapRatio?.toFixed(4) ?? '0.0000'}</span>
                             <div className="w-24 h-1 bg-slate-800 rounded-full overflow-hidden">
                               <div 
                                 className={`h-full ${asset.volumeMCapRatio > 0.15 ? 'bg-blue-500 shadow-[0_0_8px_rgba(59,130,246,0.6)]' : 'bg-slate-600'}`} 
@@ -239,11 +255,11 @@ export default function Dashboard() {
                 <div className="grid grid-cols-2 gap-4">
                   <div className="bg-[#0f172a] p-3 rounded-xl border border-slate-800">
                     <p className="text-[10px] text-slate-500 uppercase font-bold tracking-widest mb-1">Rank</p>
-                    <p className="text-lg font-black font-mono">#{selectedAsset.market_cap_rank}</p>
+                    <p className="text-lg font-black font-mono">#{selectedAsset.market_cap_rank ?? 'N/A'}</p>
                   </div>
                   <div className="bg-[#0f172a] p-3 rounded-xl border border-slate-800">
                     <p className="text-[10px] text-slate-500 uppercase font-bold tracking-widest mb-1">Vol/MCap</p>
-                    <p className="text-lg font-black font-mono">{selectedAsset.volumeMCapRatio}</p>
+                    <p className="text-lg font-black font-mono">{selectedAsset.volumeMCapRatio?.toFixed(4) ?? '0.0000'}</p>
                   </div>
                 </div>
 

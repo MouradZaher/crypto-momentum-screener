@@ -3,12 +3,12 @@ export interface CryptoAsset {
   symbol: string;
   name: string;
   image: string;
-  current_price: number;
-  market_cap: number;
-  market_cap_rank: number;
-  total_volume: number;
-  price_change_percentage_24h: number;
-  price_change_percentage_7d_in_currency?: number;
+  current_price: number | null;
+  market_cap: number | null;
+  market_cap_rank: number | null;
+  total_volume: number | null;
+  price_change_percentage_24h: number | null;
+  price_change_percentage_7d_in_currency?: number | null;
 }
 
 export interface MomentumResult extends CryptoAsset {
@@ -19,7 +19,13 @@ export interface MomentumResult extends CryptoAsset {
 }
 
 export function calculateMomentum(asset: CryptoAsset): MomentumResult {
-  const volMCapRatio = asset.total_volume / (asset.market_cap || 1);
+  const currentPrice = asset.current_price ?? 0;
+  const marketCap = asset.market_cap ?? 1;
+  const totalVolume = asset.total_volume ?? 0;
+  const priceChange24 = asset.price_change_percentage_24h ?? 0;
+  const priceChange7 = asset.price_change_percentage_7d_in_currency ?? 0;
+
+  const volMCapRatio = totalVolume / (marketCap || 1);
   
   // Weight factors
   const vMCapWeight = 0.4;
@@ -28,8 +34,8 @@ export function calculateMomentum(asset: CryptoAsset): MomentumResult {
 
   // Normalize scores (0-100)
   const vMCapScore = Math.min((volMCapRatio / 0.2) * 100, 100);
-  const pChange24Score = Math.min((Math.max(asset.price_change_percentage_24h, 0) / 15) * 100, 100);
-  const pChange7Score = Math.min((Math.max(asset.price_change_percentage_7d_in_currency || 0, 0) / 40) * 100, 100);
+  const pChange24Score = Math.min((Math.max(priceChange24, 0) / 15) * 100, 100);
+  const pChange7Score = Math.min((Math.max(priceChange7, 0) / 40) * 100, 100);
 
   const totalScore = (vMCapScore * vMCapWeight) + (pChange24Score * pChange24Weight) + (pChange7Score * pChange7Weight);
 
@@ -40,6 +46,10 @@ export function calculateMomentum(asset: CryptoAsset): MomentumResult {
 
   return {
     ...asset,
+    current_price: currentPrice,
+    market_cap: marketCap,
+    total_volume: totalVolume,
+    price_change_percentage_24h: priceChange24,
     momentumScore: Math.round(totalScore),
     volumeMCapRatio: Number(volMCapRatio.toFixed(4)),
     isEarlyBuyer: volMCapRatio > 0.15,
